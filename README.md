@@ -3,7 +3,7 @@
 **Contribution Number:** 1  
 **Student:** David Hernandez  
 **Issue:** https://github.com/rust-lang/rust-clippy/issues/17158  
-**Status:** Phase I
+**Status:** Phase I Complete
 
 ---
 
