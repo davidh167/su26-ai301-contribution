@@ -3,13 +3,14 @@
 **Contribution Number:** 1  
 **Student:** David Hernandez  
 **Issue:** https://github.com/rust-lang/rust-clippy/issues/17158  
-**Status:** Phase I Complete
+**Status:** Phase II Complete
 
 ---
 
 ## Why I Chose This Issue
 
 I've been teaching myself Rust for about a year. In that time I was able to produce some production-level code, and for this project I primarily looked at issues in tools I was already familiar with. I have some systems programming experience in C from my undergrad work, but I haven't had to touch code this close to the OS in a while.
+
 This issue caught my attention because TOCTOU bugs are something I remember from systems courses. Seeing one surface in a modern, safety-focused language like Rust seemed like an interesting opportunity to me. Although there wasn't much discussion under it and the description was just enough to get an idea of where to start, I noticed it was tagged as a "good first issue," which reassured me that the community was open to new contributors such as myself. I'm hoping to learn how Clippy's lint infrastructure works under the hood and get more comfortable reading and writing code that interacts with the compiler.
 
 ---
@@ -47,10 +48,10 @@ Clippy currently has no lint that catches this pattern. Code that calls `Path::e
 
 ### Affected Components
 
-- **`clippy_lints/src/`** — where the new lint logic will live (a new file, e.g., `path_toctou.rs` or similar)
+- **`clippy_lints/src/`** — where the new lint logic will live (a new file, `path_exists_then_metadata.rs`)
 - **`clippy_lints/src/lib.rs`** — where the lint module must be registered
 - **`tests/ui/`** — where UI test cases (input + expected output) are added for the new lint
-- Potentially **`clippy_utils/`** — shared utilities for pattern matching on method calls
+- **`clippy_utils/`** — shared utilities for receiver comparison and type checking
 
 ---
 
@@ -58,17 +59,17 @@ Clippy currently has no lint that catches this pattern. Code that calls `Path::e
 
 ### Environment Setup
 
-According to Clippy's CONTRIBUTING.md, setting up the dev environment requires:
+Followed the steps in Clippy's CONTRIBUTING.md:
 
-1. **Install a nightly Rust toolchain** — Clippy is built on nightly Rust. Run `rustup toolchain install nightly` to get it.
+1. **Install a nightly Rust toolchain** — `rustup toolchain install nightly`
 2. **Clone the repo** — `git clone https://github.com/rust-lang/rust-clippy && cd rust-clippy`
-3. **Build the project** — `cargo build` from the repo root.
-4. **Set up editor tooling (recommended)** — For VS Code with rust-analyzer, add `{ "rust-analyzer.rustc.source": "discover" }` to settings so you get proper completions for rustc internals like `Expr` and `EarlyContext`. For RustRover 2026.1+, no extra setup is needed.
+3. **Build the project** — `cargo build` from the repo root
+4. **Editor setup** — initially tried VS Code with rust-analyzer, but getting it to play nicely with Rust took long enough that switching to a dedicated IDE felt like the right call. RustRover required no extra configuration and worked out of the box.
 
 ### Steps to Reproduce
 
-1. Clone the `rust-lang/rust-clippy` repository and build it locally.
-2. Write a small Rust file containing the problematic pattern:
+1. Install a nightly Rust toolchain (`rustup toolchain install nightly`), clone the repo, and run `cargo build` from the root.
+2. Create a small Rust file with the pattern:
    ```rust
    use std::path::Path;
    fn check(p: &Path) {
@@ -77,12 +78,14 @@ According to Clippy's CONTRIBUTING.md, setting up the dev environment requires:
        }
    }
    ```
-3. Run `cargo clippy` on that file — observe that **no warning is emitted**, confirming the lint is missing.
+3. Run `cargo clippy` on the file.
+4. **Expected:** a warning flagging the TOCTOU pattern.
+5. **Actual:** no warning is emitted — confirming the lint doesn't exist yet.
 
 ### Reproduction Evidence
 
+- **Working branch:** https://github.com/davidh167/rust-clippy/tree/feat/linter-Path-metadata-after-Path-exists
 - **Commit showing reproduction:** [Link to commit in your fork]
-- **Screenshots/logs:** [If applicable]
 - **My findings:** [What you discovered during reproduction]
 
 ---
@@ -91,15 +94,93 @@ According to Clippy's CONTRIBUTING.md, setting up the dev environment requires:
 
 ### Analysis
 
-[To be completed in a future phase.]
+There's no existing lint for this pattern — the fix is to build one. The lint needs to detect an `if` expression whose condition is a call to `.exists()` on a `Path`-like receiver, where the body of that `if` block then calls `.metadata()` on the same receiver. The most structurally similar existing lint is `pathbuf_init_then_push`, which also tracks sequential operations on a path receiver across statements. The key difference is that our lint's primary trigger is an `if` expression, so the entry point is `check_expr` matching `ExprKind::If` rather than a state machine across statements.
 
 ### Proposed Solution
 
-[To be completed in a future phase.]
+A new `LateLintPass` registered as a standalone lint (not inside `methods/`) that:
+1. Matches `if <cond> { <then_block> }` where `cond` is a call to `.exists()` on a `Path` or `PathBuf` receiver
+2. Checks whether `then_block` calls `.metadata()` on the same receiver using `SpanlessEq` for comparison
+3. Emits a warning with a suggestion to replace both calls with `if let Ok(md) = path.metadata()`
 
 ### Implementation Plan
 
-[To be completed in a future phase.]
+**Understand:**
+
+Two variants of the pattern to detect:
+
+```rust
+// Variant A — if guard
+if path.exists() {
+    let md = path.metadata()?;
+}
+
+// Variant B — sequential statements
+let exists = path.exists();
+if exists {
+    let md = path.metadata()?;
+}
+```
+
+Suggested fix for both:
+
+```rust
+if let Ok(md) = path.metadata() {
+    // use md
+}
+```
+
+**Match:**
+
+`pathbuf_init_then_push` (`clippy_lints/src/pathbuf_init_then_push.rs`) is the closest structural reference — it detects two sequential operations on a path receiver and is registered as a standalone `LateLintPass`. For type-checking path receivers, `path_buf_push_overwrite.rs` and `path_ends_with_ext.rs` show the `is_diag_item(cx, sym::Path)` pattern to follow.
+
+**Plan:**
+
+1. Scaffold the lint:
+   ```bash
+   cargo dev new_lint --name=path_exists_then_metadata --pass=late --category=nursery
+   ```
+   This creates `clippy_lints/src/path_exists_then_metadata.rs`, adds the module entry and registration in `lib.rs`, and stubs out `tests/ui/path_exists_then_metadata.rs`.
+
+2. Declare the lint in the new file using `declare_clippy_lint!` with full documentation (What it does, Why is this bad?, Example, Use instead).
+
+3. Implement `check_expr` on the `LateLintPass` to match `ExprKind::If`, extract the condition's receiver and method name, verify the receiver type is `Path`/`PathBuf`, and check the then-block for a `.metadata()` call on the same receiver via `SpanlessEq::new(cx).eq_expr()`.
+
+4. Implement helper functions:
+   - `method_call_name` — extracts receiver + method name from `ExprKind::MethodCall`
+   - `is_path_receiver` — type-checks the receiver using `is_diag_item`
+   - `block_calls_metadata_on` — walks the then-block for a matching `.metadata()` call
+   - `build_suggestion` — constructs the replacement string
+
+5. Register in `lib.rs` — add `mod path_exists_then_metadata` and `store.register_late_pass(...)`.
+
+6. Write UI tests covering positive cases (basic `if path.exists()` + `path.metadata()`, PathBuf variant) and negative cases (exists without metadata, metadata on a different path, metadata outside the if block).
+
+7. Run `TESTNAME=path_exists_then_metadata cargo uibless` to generate `.stderr` and `.fixed` files.
+
+**Implement:** https://github.com/davidh167/rust-clippy/tree/feat/linter-Path-metadata-after-Path-exists
+
+**Review:**
+- [ ] Lint naming conventions followed
+- [ ] UI tests pass with committed `.stderr` file
+- [ ] `cargo test` passes locally
+- [ ] `cargo dev update_lints` executed
+- [ ] Lint doc block complete (What it does / Why is this bad? / Example / Use instead)
+- [ ] `cargo dev fmt` run (requires `rustup component add rustfmt --toolchain=nightly`)
+- [ ] `#[clippy::version]` set to current nightly (`rustc -vV` to check)
+
+**Evaluate:**
+
+| Test case | Expected |
+|-----------|----------|
+| `if path.exists() { path.metadata() }` | lint fires |
+| `if path.exists() { path.metadata().unwrap() }` | lint fires |
+| PathBuf variant | lint fires |
+| `if path.exists() { /* no metadata */ }` | no lint |
+| `if path.exists() { other_path.metadata() }` | no lint |
+| `if other_path.exists() { path.metadata() }` | no lint |
+| Already using `if let Ok(md) = path.metadata()` | no lint |
+| `path.metadata()` called after the `if` block | no lint |
 
 ---
 
