@@ -6,6 +6,14 @@
 **Status:** Phase IV - In Progress
 
 ---
+## Latest Update:
+
+Jul 12:
+
+Review stages between different maintainers is taking longer than I expected. 
+Still technically on Phase IV of my first PR, actively exploring new repos or issues within the same repo. 
+
+---
 
 ## Why I Chose This Issue
 
